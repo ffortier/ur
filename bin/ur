@@ -1,10 +1,18 @@
 #!/bin/bash
 
-mkdir -p ~/.ur/log
-mkdir -p ~/.ur/packages
+packages_file=${UR_PACKAGES_FILE:-./packages}
+cache_dir=${UR_CACHE:-~/.ur}
+
+mkdir -p "$cache_dir/log"
+mkdir -p "$cache_dir/packages"
 
 function main {
-  tcpserver 0 8080 sh -c "$0 incoming_request"
+  local hostname=${UR_HOSTNAME:-0}
+  local port=${UR_PORT:-8080}
+
+  echo "starting server $hostname $port"
+
+  tcpserver $hostname $port sh -c "$0 incoming_request"
 }
 
 function incoming_request {
@@ -49,7 +57,7 @@ function npm_handler {
 
   package=${package%/*}
 
-  local record=$(grep "^$package" ./packages)
+  local record=$(grep "^$package" "$packages_file")
 
   if [[ -z "$record" ]]; then
     redirect_handler "https://registry.npmjs.org$url"
@@ -58,9 +66,18 @@ function npm_handler {
   fi
 }
 
-function load_package {
-  local packageDir=$(echo "$1" | shasum | awk '{print $1}')
-  echo "~/packages/$packageDir"
+function mirror_package {
+  local git_url=$1
+  local package_dir=$(echo "$git_url" | sha1sum | awk '{print $1}')
+  
+  if [[ ! -d "$cache_dir/packages/$package_dir" ]]; then
+    mkdir -p "$cache_dir/packages/$package_dir"
+    pushd "$cache_dir/packages/$package_dir" > /dev/null 2>&1
+    git clone --mirror $git_url > /dev/null 2>&1
+    popd > /dev/null 2>&1
+  fi
+
+  echo -n "$cache_dir/packages/$package_dir"
 }
 
 function log_info {
