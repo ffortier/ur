@@ -1,0 +1,70 @@
+#!/bin/bash
+
+mkdir -p ~/.ur/log
+mkdir -p ~/.ur/packages
+
+function main {
+  tcpserver 0 8080 sh -c "$0 incoming_request"
+}
+
+function incoming_request {
+  local in
+  local method
+  local url
+  local version
+
+  read -r method url version
+
+  log_info "$method $url $version"
+
+  local headers=$(read_headers)
+  
+  npm_handler $method $url
+}
+
+function redirect_handler {
+  local location="$1"
+
+  echo -e "HTTP/1.1 302 Found\r
+Location: $location\r
+\r"
+}
+
+function read_headers {
+  local line
+
+  while read -r line; do
+    line=$(echo $line | tr -d '\r' | tr -d '\n')
+
+    [[ -z "$line" ]] && break
+
+    echo "$line"
+  done
+}
+
+function npm_handler {
+  local method=$1
+  local url=$2
+  local package=${url##/}
+
+  package=${package%/*}
+
+  local record=$(grep "^$package" ./packages)
+
+  if [[ -z "$record" ]]; then
+    redirect_handler "https://registry.npmjs.org$url"
+  else
+    load_package ${record#* }
+  fi
+}
+
+function load_package {
+  local packageDir=$(echo "$1" | shasum | awk '{print $1}')
+  echo "~/packages/$packageDir"
+}
+
+function log_info {
+  echo $@
+}
+
+${1:-main} ${@:2}
