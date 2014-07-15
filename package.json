@@ -8,7 +8,7 @@
   },
   "scripts": {
     "pretest": "cd test/support && bash -c '[[ -d shcov-5 ]] || tar -xzf shcov-5.tar.gz'",
-    "test": "jasmine-node test/spec",
+    "test": "PATH=$PATH:$(pwd)/test/support/shcov-5/scripts bash-spec-runner test/spec/ur-spec.sh",
     "posttest": "PATH=$PATH:$(pwd)/test/support/shcov-5/scripts shlcov /tmp/shcov coverage"
   },
   "repository": {
@@ -27,13 +27,6 @@
   },
   "homepage": "https://github.com/ffortier/ur",
   "devDependencies": {
-    "i": "^0.3.2",
-    "q": "^1.0.1",
-    "proxyquire": "^1.0.1",
-    "jasmine-node": "^1.14.3",
-    "jasmine-reporters": "^0.2.1",
-    "extend": "^1.3.0",
-    "temp": "^0.8.0",
-    "shasum": "^1.0.0"
+    "bash-spec-runner": "0.0.0"
   }
 }

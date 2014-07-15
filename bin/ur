@@ -1,5 +1,4 @@
 #!/bin/bash
-
 packages_file=${UR_PACKAGES_FILE:-./packages}
 cache_dir=${UR_CACHE:-~/.ur}
 
