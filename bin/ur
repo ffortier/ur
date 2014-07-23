@@ -1,86 +1,218 @@
 #!/bin/bash
-packages_file=${UR_PACKAGES_FILE:-./packages}
-cache_dir=${UR_CACHE:-~/.ur}
-
-mkdir -p "$cache_dir/log"
-mkdir -p "$cache_dir/packages"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+handlers='-e "s/\/npm\(\/.*\)/npm_handler \1/" -e "s/\/bower\(\/.*\)/bower_handler \1/" -e "s/\/archive\(\/.*\)/archive_handler \1/"'
 
 function main {
-  local hostname=${UR_HOSTNAME:-0}
-  local port=${UR_PORT:-8080}
+    local hostname=${UR_HOSTNAME:-0}
+    local port=${UR_PORT:-8080}
 
-  echo "starting server $hostname $port"
+    mkdir -p "$cache_dir/log"
+    mkdir -p "$cache_dir/packages"
 
-  tcpserver $hostname $port sh -c "$0 incoming_request"
+    echo "starting server $hostname $port"
+
+    tcpserver $hostname $port sh -c "$0 -f incoming_request -p ${UR_PACKAGES_FILE:-./packages} -c ${UR_CACHE:-~/.ur}"
+}
+
+function usage {
+    echo "Usage $0 [-p <package file>] [-h <hostname>] [-l <port>] [-c <cache folder>] [-f <function to call>]" 1>&2
+    exit 1
 }
 
 function incoming_request {
-  local in
-  local method
-  local url
-  local version
+    local in
+    local method
+    local url
+    local version
 
-  read -r method url version
+    read -r method url version
 
-  log_info "$method $url $version"
+    log_info "$method $url $version"
 
-  local headers=$(read_headers)
-  
-  npm_handler $method $url
+    local headers=$(read_headers)
+    local handler=$(eval "sed $handlers <<< '$url'")
+    
+    if [[ -n "$handler" ]]; then
+        $handler "$method" "$url" "$headers"
+    else
+        error_handler 404 "Not found"
+    fi
 }
 
 function redirect_handler {
-  local location="$1"
+    local location="$1"
 
-  echo -e "HTTP/1.1 302 Found\r
+    echo -e "HTTP/1.1 302 Found\r
 Location: $location\r
+Connection: close\r
 \r"
 }
 
 function read_headers {
-  local line
+    local line
 
-  while read -r line; do
-    line=$(echo $line | tr -d '\r' | tr -d '\n')
+    while read -r line; do
+        line=$(echo $line | tr -d '\r' | tr -d '\n')
 
-    [[ -z "$line" ]] && break
+        [[ -z "$line" ]] && break
 
-    echo "$line"
-  done
+        echo "$line"
+    done
 }
 
 function npm_handler {
-  local method=$1
-  local url=$2
-  local package=${url##/}
+    local url=$1
+    local method=$2
+    local package=${url##/}
 
-  package=${package%/*}
+    package=${package%/*}
 
-  local record=$(grep "^$package" "$packages_file")
+    log_info grep -P "^$package\s" "$packages_file"
+    local record=$(grep "^$package\s" "$packages_file")
 
-  if [[ -z "$record" ]]; then
-    redirect_handler "https://registry.npmjs.org$url"
-  else
-    load_package ${record#* }
-  fi
+    if [[ -z "$record" ]]; then
+        redirect_handler "https://registry.npmjs.org$url"
+    else
+        load_package ${record#* } | xargs_fn get_tags | render_template npm
+    fi
 }
 
-function mirror_package {
-  local git_url=$1
-  local package_dir=$(echo "$git_url" | sha1sum | awk '{print $1}')
-  
-  if [[ ! -d "$cache_dir/packages/$package_dir" ]]; then
-    mkdir -p "$cache_dir/packages/$package_dir"
-    pushd "$cache_dir/packages/$package_dir" > /dev/null 2>&1
-    git clone --mirror $git_url > /dev/null 2>&1
-    popd > /dev/null 2>&1
-  fi
+function xargs_fn {
+    local cmd="$*"
+    local line
 
-  echo -n "$cache_dir/packages/$package_dir"
+    while read -r line; do
+        cmd="$cmd $line"
+    done
+
+    $cmd
+
+    return $?
+}
+
+function get_tags {
+    log_info "Getting tags for $1"
+    pushd_quiet $1
+    git tag
+    popd_quiet
+}
+
+function render_template {
+    local buf=''
+
+    while read -r line; do
+        buf="$buf,$($DIR/$1-tag.tpl.sh $line)"
+    done
+    
+    local content=`$DIR/$1.tpl.sh "${buf##,}"`
+
+    echo -e "HTTP/1.1 200 OK\r
+Content-Length: ${#content}\r
+Content-Type: application/json\r
+Connection: close\r
+\r
+$content"
+}
+
+function load_package {
+    local git_url=$1
+    local package_dir=$(echo "$git_url" | sha1sum | awk '{print $1}')
+
+    log_info "Loading package $git_url into $cache_dir/packages/$package_dir"
+
+    pushd_quiet $cache_dir/packages
+    acquire_lock $package_dir
+    
+    if [[ ! -d "$package_dir" ]]; then
+        mkdir "$package_dir"
+        git clone --mirror $git_url $package_dir 2>&1 | log_stream || internal_server_error
+    fi
+
+    release_lock $package_dir
+    popd_quiet $cache_dir/packages
+
+    echo "$cache_dir/packages/$package_dir"
+}
+
+function internal_server_error {
+    echo -e "HTTP/1.1 500 Internal Server Error\r
+Content-Length: 0\r
+Content-Type: text/plain\r
+Connection: close\r
+\r"
+}
+
+function acquire_lock {
+    local name=$1
+
+    mkdir -p .locks
+    pushd_quiet .locks
+
+    set -o noclobber
+
+    { > $name ; } &> /dev/null
+
+    while [[ $? -ne 0 ]]; do
+        sleep 1
+
+        { > $name ; } &> /dev/null
+    done
+
+    set +o noclobber
+    popd_quiet
+}
+
+function release_lock {
+    local name=$1
+
+    rm .locks/$name
 }
 
 function log_info {
-  echo $@
+    echo "$*" >> "$UR_CACHE/log/info.log"
 }
 
-${1:-main} ${@:2}
+function log_stream {
+    while read -r line; do
+        echo "$line" >> "$UR_CACHE/log/info.log"
+    done
+
+    [[ -z "$line" ]] || echo "$line" >> "$UR_CACHE/log/info.log"
+}
+
+function pushd_quiet {
+    pushd "$1" > /dev/null 2>&1
+}
+
+function popd_quiet {
+    popd > /dev/null 2>&1
+}
+
+while getopts ":p:h:l:c:f:" o; do
+    case "${o}" in
+        p)
+            UR_PACKAGES_FILE=${OPTARG}
+            ;;
+        h)
+            UR_HOSTNAME=${OPTARG}
+            ;;
+        l)
+            UR_PORT=${OPTARG}
+            ;;
+        c)
+            UR_CACHE=${OPTARG}
+            ;;
+        f)
+            UR_FUNCTION=${OPTARG}
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+packages_file=${UR_PACKAGES_FILE:-./packages}
+cache_dir=${UR_CACHE:-~/.ur}
+
+${UR_FUNCTION:-main} $@
